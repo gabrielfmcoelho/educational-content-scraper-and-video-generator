@@ -31,21 +31,32 @@ def get_insight_prompt(url: str, conteudo_bruto: str) -> str:
     """
 
 
-def get_video_script_prompt(conteudo_insight: str) -> str:
+def get_video_script_prompt(conteudo_insight: str, contexto_consolidado: str = '') -> str:
     """
     Returns the prompt for generating a 30-second video script.
 
     Args:
         conteudo_insight: Educational insight content in markdown format
+        contexto_consolidado: Optional consolidated insights for additional context
 
     Returns:
         Formatted prompt string for Gemini
     """
+    contexto_extra = ''
+    if contexto_consolidado:
+        contexto_extra = f"""
+
+    CONTEXTO ADICIONAL (Consolidado de Insights):
+    Use este contexto para enriquecer o roteiro com informações relevantes e consistentes:
+    {contexto_consolidado[:3000]}
+    """
+
     return f"""
     Você é um roteirista especializado em criar conteúdo educativo para idosos.
 
     Com base no seguinte conteúdo educativo:
     {conteudo_insight[:VIDEO_CONTENT_LIMIT]}
+    {contexto_extra}
 
     Crie um ROTEIRO DE VÍDEO DE 30 SEGUNDOS com o seguinte formato:
 

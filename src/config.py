@@ -32,6 +32,10 @@ class Config:
     # AI Provider Selection ('gemini' or 'openai')
     ai_provider: str
 
+    # Veo Configuration
+    veo_api_key: str
+    veo_model_name: str
+
     # Application Configuration
     app_name: str
     app_env: str
@@ -70,6 +74,10 @@ def get_config() -> Config:
 
         # AI Provider
         ai_provider=os.getenv('AI_PROVIDER', 'gemini'),
+
+        # Veo
+        veo_api_key=os.getenv('VEO_API_KEY', ''),
+        veo_model_name=os.getenv('VEO_MODEL_NAME', 'veo-2'),
 
         # Application
         app_name=os.getenv('APP_NAME', 'scraper-idosos'),

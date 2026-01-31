@@ -10,7 +10,7 @@ def main():
 
     print(f"\nRoteiros gerados com sucesso: {len(roteiros_gerados)}")
 
-    # Video upload placeholder (Nano Banana integration)
+    # Video upload placeholder (Veo integration)
     print("\nProcessando e subindo videos...\n")
     processar_e_subir_videos()
 
