@@ -3,3 +3,7 @@ __pycache__/
 .claude
 roteiros/
 .env
+.vscode
+*.json
+!package.json
+!package-lock.json

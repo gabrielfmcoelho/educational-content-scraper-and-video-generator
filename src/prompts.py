@@ -1,7 +1,51 @@
+import re
+from typing import List
+
 # Content limits for prompts
 INSIGHT_CONTENT_LIMIT = 15000
 VIDEO_CONTENT_LIMIT = 5000
 CONSOLIDATION_CONTENT_LIMIT = 50000
+
+
+def parse_scenes_from_roteiro(roteiro: str) -> List[str]:
+    """
+    Parses a roteiro and extracts individual scene descriptions for video generation.
+
+    Args:
+        roteiro: Full roteiro text in markdown format
+
+    Returns:
+        List of scene prompts ready for VEO video generation
+    """
+    scenes = []
+
+    # Pattern to match scene sections: ## CENA N or ## Cenário N
+    scene_pattern = r'##\s*(?:CENA|Cenário|Cena)\s*(\d+)[^\n]*\n(.*?)(?=##\s*(?:CENA|Cenário|Cena|INFORMAÇÕES)|$)'
+    matches = re.findall(scene_pattern, roteiro, re.DOTALL | re.IGNORECASE)
+
+    for scene_num, scene_content in matches:
+        # Extract visual description
+        visual_match = re.search(r'\*?\*?(?:VISUAL|Descrição visual)[:\*]*\s*(.+?)(?=\*?\*?(?:AUDIO|ÁUDIO|Locução|TRANSIÇÃO)|$)',
+                                  scene_content, re.DOTALL | re.IGNORECASE)
+
+        if visual_match:
+            visual_desc = visual_match.group(1).strip()
+            # Clean up markdown formatting
+            visual_desc = re.sub(r'\[|\]', '', visual_desc)
+            visual_desc = re.sub(r'\*+', '', visual_desc)
+            visual_desc = visual_desc.strip()
+
+            if visual_desc:
+                # Create a prompt suitable for VEO
+                scene_prompt = f"Cena {scene_num}: {visual_desc}"
+                scenes.append(scene_prompt)
+
+    # Fallback: if no scenes parsed, split roteiro into chunks
+    if not scenes:
+        # Simple fallback - use the whole roteiro
+        scenes = [roteiro[:1000]]
+
+    return scenes
 
 
 def get_insight_prompt(url: str, conteudo_bruto: str) -> str:
@@ -31,13 +75,14 @@ def get_insight_prompt(url: str, conteudo_bruto: str) -> str:
     """
 
 
-def get_video_script_prompt(conteudo_insight: str, contexto_consolidado: str = '') -> str:
+def get_video_script_prompt(conteudo_insight: str, contexto_consolidado: str = '', num_scenes: int = 6) -> str:
     """
-    Returns the prompt for generating a 30-second video script.
+    Returns the prompt for generating a video script with multiple scenes.
 
     Args:
         conteudo_insight: Educational insight content in markdown format
         contexto_consolidado: Optional consolidated insights for additional context
+        num_scenes: Number of scenes to generate (each ~8 seconds)
 
     Returns:
         Formatted prompt string for Gemini
@@ -51,6 +96,20 @@ def get_video_script_prompt(conteudo_insight: str, contexto_consolidado: str = '
     {contexto_consolidado[:3000]}
     """
 
+    # Build scene template
+    scenes_template = ""
+    for i in range(1, num_scenes + 1):
+        start_time = (i - 1) * 8
+        end_time = i * 8
+        scenes_template += f"""
+    ## CENA {i} ({start_time}-{end_time} segundos)
+    **VISUAL:** [Descrição detalhada do que aparece na tela - pessoas, objetos, ações, cores, ambiente]
+    **AUDIO:** [Narração ou diálogo em português brasileiro]
+    **TRANSIÇÃO:** [Como esta cena conecta com a próxima]
+"""
+
+    total_duration = num_scenes * 8
+
     return f"""
     Você é um roteirista especializado em criar conteúdo educativo para idosos.
 
@@ -58,27 +117,23 @@ def get_video_script_prompt(conteudo_insight: str, contexto_consolidado: str = '
     {conteudo_insight[:VIDEO_CONTENT_LIMIT]}
     {contexto_extra}
 
-    Crie um ROTEIRO DE VÍDEO DE 30 SEGUNDOS com o seguinte formato:
+    Crie um ROTEIRO DE VÍDEO DE {total_duration} SEGUNDOS com EXATAMENTE {num_scenes} CENAS.
 
-    # Roteiro para Vídeo de 30 Segundos
+    IMPORTANTE: Cada cena deve ter uma descrição visual DETALHADA e ESPECÍFICA para geração de vídeo por IA.
+    Descreva exatamente o que deve aparecer visualmente (pessoas, objetos, ações, ambiente, cores).
 
-    ## Cenário 1 (0-10 segundos)
-    - Descrição visual:
-    - Locução:
+    FORMATO OBRIGATÓRIO:
+{scenes_template}
+    ## INFORMAÇÕES TÉCNICAS
+    - Estilo visual: [Realista/Animação/Ilustrado]
+    - Paleta de cores: [Cores predominantes]
+    - Tom geral: [Amigável/Sério/Educativo]
 
-    ## Cenário 2 (10-20 segundos)
-    - Descrição visual:
-    - Locução:
-
-    ## Cenário 3 (20-30 segundos)
-    - Descrição visual:
-    - Locução:
-
-    ## Efeitos e Áudio
-    - Som de fundo:
-    - Transições:
-
-    Mantenha a linguagem simples, acessível e clara para idosos.
+    REGRAS:
+    1. Linguagem simples e acessível para idosos
+    2. Descrições visuais devem ser claras para IA de geração de vídeo
+    3. Cada cena deve fluir naturalmente para a próxima
+    4. Todo conteúdo em português brasileiro
     """
 
 

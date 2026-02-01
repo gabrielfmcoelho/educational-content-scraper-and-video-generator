@@ -27,7 +27,9 @@ class RoteiroResult:
 
 def gerar_roteiro_video(conteudo_insight: str, contexto_consolidado: str = '') -> str:
     """
-    Generates a 30-second video script from insight content.
+    Generates a video script from insight content with multiple scenes.
+
+    The number of scenes is determined by ROTEIRO_NUM_SCENES env var.
 
     Args:
         conteudo_insight: Educational insight in markdown format
@@ -36,7 +38,8 @@ def gerar_roteiro_video(conteudo_insight: str, contexto_consolidado: str = '') -
     Returns:
         Generated video script text
     """
-    prompt = get_video_script_prompt(conteudo_insight, contexto_consolidado)
+    config = get_config()
+    prompt = get_video_script_prompt(conteudo_insight, contexto_consolidado, num_scenes=config.roteiro_num_scenes)
     return gerar_conteudo(prompt)
 
 
@@ -154,6 +157,38 @@ def listar_insights_bucket() -> list:
         return []
 
 
+def listar_roteiros_existentes() -> set:
+    """
+    Lists all existing roteiro files in MinIO or local directory.
+
+    Returns:
+        Set of existing roteiro filenames (e.g., {'roteiro_xxx.md', ...})
+    """
+    config = get_config()
+    roteiros = set()
+
+    if config.save_on_minio:
+        try:
+            s3 = get_minio_client()
+            response = s3.list_objects_v2(Bucket=config.minio_bucket_roteiros)
+
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    key = obj['Key']
+                    if key.endswith('.md'):
+                        roteiros.add(key)
+        except Exception as e:
+            print(f"Erro ao listar roteiros existentes no MinIO: {e}")
+    else:
+        roteiros_dir = 'roteiros'
+        if os.path.exists(roteiros_dir):
+            for arquivo in os.listdir(roteiros_dir):
+                if arquivo.endswith('.md'):
+                    roteiros.add(arquivo)
+
+    return roteiros
+
+
 def carregar_insight_bucket(arquivo: str) -> str:
     """
     Loads a specific insight file from MinIO bucket.
@@ -235,6 +270,7 @@ def gerar_roteiros(
 ) -> List[str]:
     """
     Generates video scripts for all insights in parallel.
+    Skips insights that already have roteiros generated.
 
     Args:
         diretorio_insights: Directory containing insight markdown files
@@ -245,6 +281,11 @@ def gerar_roteiros(
     """
     config = get_config()
     garantir_diretorio(diretorio_roteiros)
+
+    # Get existing roteiros to skip
+    roteiros_existentes = listar_roteiros_existentes()
+    if roteiros_existentes:
+        print(f"Encontrados {len(roteiros_existentes)} roteiros já existentes.\n")
 
     # Load consolidated insights as context
     contexto_consolidado = carregar_consolidado(diretorio_insights)
@@ -258,14 +299,46 @@ def gerar_roteiros(
         arquivos = listar_insights_bucket()
     else:
         garantir_diretorio(diretorio_insights)
-        arquivos = [f for f in os.listdir(diretorio_insights) 
+        arquivos = [f for f in os.listdir(diretorio_insights)
                     if f.endswith('.md') and f != 'consolidado_insights.md']
 
     if not arquivos:
         print("Nenhum arquivo de insight encontrado.")
         return []
 
-    print(f"Gerando roteiros para {len(arquivos)} insights com {config.max_workers} workers...\n")
+    # Filter insights that need roteiros (check by title from content)
+    arquivos_pendentes = []
+    for arquivo in arquivos:
+        # Load content to extract title for accurate matching
+        try:
+            if config.save_on_minio:
+                conteudo = carregar_insight_bucket(arquivo)
+            else:
+                caminho = os.path.join(diretorio_insights, arquivo)
+                with open(caminho, 'r', encoding='utf-8') as f:
+                    conteudo = f.read()
+
+            titulo = extrair_titulo_do_markdown(conteudo)
+            if titulo:
+                roteiro_esperado = f"roteiro_{slugify(titulo)}.md"
+            else:
+                nome_base = arquivo.replace('.md', '')
+                roteiro_esperado = f"roteiro_{slugify(nome_base)}.md"
+
+            if roteiro_esperado in roteiros_existentes:
+                print(f"⏭ Pulando {arquivo} - roteiro já existe ({roteiro_esperado})")
+            else:
+                arquivos_pendentes.append(arquivo)
+        except Exception as e:
+            # If we can't check, include it to be safe
+            print(f"⚠ Não foi possível verificar {arquivo}: {e}")
+            arquivos_pendentes.append(arquivo)
+
+    if not arquivos_pendentes:
+        print("\nTodos os roteiros já foram gerados. Nada a fazer.")
+        return []
+
+    print(f"\nGerando roteiros para {len(arquivos_pendentes)} insights com {config.max_workers} workers...\n")
 
     resultados: List[RoteiroResult] = []
     roteiros_gerados: List[str] = []
@@ -274,7 +347,7 @@ def gerar_roteiros(
     with ThreadPoolExecutor(max_workers=config.max_workers) as executor:
         futures = {
             executor.submit(processar_insight, arquivo, diretorio_insights, contexto_consolidado): arquivo
-            for arquivo in arquivos
+            for arquivo in arquivos_pendentes
         }
 
         for future in as_completed(futures):
@@ -283,9 +356,9 @@ def gerar_roteiros(
                 resultado = future.result()
                 resultados.append(resultado)
                 status = "OK" if resultado.success else f"ERRO: {resultado.error}"
-                print(f"[{len(resultados)}/{len(arquivos)}] {arquivo} -> {status}")
+                print(f"[{len(resultados)}/{len(arquivos_pendentes)}] {arquivo} -> {status}")
             except Exception as e:
-                print(f"[{len(resultados)}/{len(arquivos)}] {arquivo} -> ERRO: {e}")
+                print(f"[{len(resultados)}/{len(arquivos_pendentes)}] {arquivo} -> ERRO: {e}")
 
     # Save results
     print(f"\nSalvando {len(resultados)} roteiros...")
@@ -304,8 +377,9 @@ def processar_e_subir_videos(diretorio_roteiros: str = 'roteiros') -> None:
 
     This function:
     1. Reads video scripts from local directory or MinIO
-    2. Generates videos using Veo API
-    3. Uploads generated videos to MinIO bucket
+    2. Checks for existing videos and skips them
+    3. Generates videos using Veo API (respecting MAX_VIDEOS_PER_RUN limit)
+    4. Uploads generated videos to MinIO bucket
 
     Args:
         diretorio_roteiros: Directory containing script markdown files
@@ -324,13 +398,38 @@ def processar_e_subir_videos(diretorio_roteiros: str = 'roteiros') -> None:
         print("Nenhum roteiro encontrado para gerar vídeos.")
         return
 
-    print(f"Processando {len(roteiros)} roteiros com Veo...\n")
+    # Get existing videos to skip
+    videos_existentes = listar_videos_existentes()
+    if videos_existentes:
+        print(f"Encontrados {len(videos_existentes)} vídeos já existentes.\n")
+
+    # Filter roteiros that don't have videos yet
+    roteiros_pendentes = {}
+    for nome_roteiro, conteudo in roteiros.items():
+        nome_video = nome_roteiro.replace('.md', '.mp4')
+        if nome_video in videos_existentes:
+            print(f"⏭ Pulando {nome_roteiro} - vídeo já existe")
+        else:
+            roteiros_pendentes[nome_roteiro] = conteudo
+
+    if not roteiros_pendentes:
+        print("\nTodos os vídeos já foram gerados. Nada a fazer.")
+        return
+
+    # Apply limit if configured
+    total_pendentes = len(roteiros_pendentes)
+    if config.max_videos_per_run > 0 and total_pendentes > config.max_videos_per_run:
+        print(f"\nLimitando a {config.max_videos_per_run} vídeos nesta execução (de {total_pendentes} pendentes).")
+        roteiros_limitados = dict(list(roteiros_pendentes.items())[:config.max_videos_per_run])
+        roteiros_pendentes = roteiros_limitados
+
+    print(f"\nProcessando {len(roteiros_pendentes)} roteiros com Veo...\n")
 
     sucessos = 0
     erros = 0
 
-    for idx, (nome_roteiro, conteudo_roteiro) in enumerate(roteiros.items(), 1):
-        print(f"[{idx}/{len(roteiros)}] Processando: {nome_roteiro}")
+    for idx, (nome_roteiro, conteudo_roteiro) in enumerate(roteiros_pendentes.items(), 1):
+        print(f"[{idx}/{len(roteiros_pendentes)}] Processando: {nome_roteiro}")
 
         # Extract title for video generation
         titulo = extrair_titulo_do_markdown(conteudo_roteiro) or nome_roteiro.replace('.md', '')
@@ -354,7 +453,7 @@ def processar_e_subir_videos(diretorio_roteiros: str = 'roteiros') -> None:
                 video_bytes,
                 content_type='video/mp4'
             )
-            
+
             if success:
                 print(f"✓ Vídeo salvo no MinIO: {nome_video}\n")
                 sucessos += 1
@@ -371,9 +470,43 @@ def processar_e_subir_videos(diretorio_roteiros: str = 'roteiros') -> None:
             sucessos += 1
 
     print(f"\n=== RESUMO ===")
-    print(f"Total de vídeos processados: {len(roteiros)}")
+    print(f"Roteiros totais: {len(roteiros)}")
+    print(f"Vídeos já existentes: {len(videos_existentes)}")
+    print(f"Processados nesta execução: {len(roteiros_pendentes)}")
     print(f"Sucessos: {sucessos}")
     print(f"Erros: {erros}")
+
+
+def listar_videos_existentes() -> set:
+    """
+    Lists all existing video files in MinIO or local directory.
+
+    Returns:
+        Set of existing video filenames (e.g., {'roteiro_xxx.mp4', ...})
+    """
+    config = get_config()
+    videos = set()
+
+    if config.save_on_minio:
+        try:
+            s3 = get_minio_client()
+            response = s3.list_objects_v2(Bucket=config.minio_bucket_aulas)
+
+            if 'Contents' in response:
+                for obj in response['Contents']:
+                    key = obj['Key']
+                    if key.endswith('.mp4'):
+                        videos.add(key)
+        except Exception as e:
+            print(f"Erro ao listar vídeos existentes no MinIO: {e}")
+    else:
+        videos_dir = 'videos'
+        if os.path.exists(videos_dir):
+            for arquivo in os.listdir(videos_dir):
+                if arquivo.endswith('.mp4'):
+                    videos.add(arquivo)
+
+    return videos
 
 
 def obter_roteiros(diretorio_roteiros: str = 'roteiros') -> dict:
